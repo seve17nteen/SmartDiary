@@ -1,43 +1,88 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using SmartDiary.Web.Data;
 using SmartDiary.Web.Models;
-using System.Diagnostics;
-using DiaryTask = SmartDiary.Web.Models.TodoTask;
 using Microsoft.AspNetCore.Identity;
-using SmartDiary.Web.Models;
 using SmartDiary.Web.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Add services to the container.
 builder.Services.AddControllersWithViews();
 
+// Добавляем контроллеры API
+builder.Services.AddControllers();
+
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-	options.UseSqlServer(
-		builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 builder.Services.AddIdentity<User, IdentityRole>(options =>
 {
-	options.Password.RequireDigit = true;
-	options.Password.RequiredLength = 6;
-	options.Password.RequireUppercase = true;
-	options.Password.RequireLowercase = true;
-	options.Password.RequireNonAlphanumeric = false;
-
-	options.User.RequireUniqueEmail = true;
+    options.Password.RequireDigit = true;
+    options.Password.RequiredLength = 6;
+    options.Password.RequireUppercase = true;
+    options.Password.RequireLowercase = true;
+    options.Password.RequireNonAlphanumeric = false;
+    options.User.RequireUniqueEmail = true;
 })
-
 .AddEntityFrameworkStores<ApplicationDbContext>()
 .AddDefaultTokenProviders();
 
 builder.Services.AddScoped<ITaskService, TaskService>();
 
-builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+// ========== ДОБАВЛЯЕМ JWT АУТЕНТИФИКАЦИЮ ==========
+var jwtSettings = builder.Configuration.GetSection("JwtSettings");
+var secretKey = Encoding.UTF8.GetBytes(jwtSettings["Secret"]);
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.RequireHttpsMetadata = false;
+    options.SaveToken = true;
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidIssuer = jwtSettings["Issuer"],
+        ValidAudience = jwtSettings["Audience"],
+        IssuerSigningKey = new SymmetricSecurityKey(secretKey)
+    };
+});
+
+builder.Services.AddAuthorization();
+
+// ========== ДОБАВЛЯЕМ CORS ==========
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowReactApp",
+        builder =>
+        {
+            builder.WithOrigins("http://localhost:3000")
+                   .AllowAnyHeader()
+                   .AllowAnyMethod()
+                   .AllowCredentials();
+        });
+});
 
 var app = builder.Build();
 
-SeedData(app.Services);
+// Seed data
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    var userManager = scope.ServiceProvider.GetRequiredService<UserManager<User>>();
+    SeedData(context, userManager);
+}
 
+// Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Home/Error");
@@ -49,44 +94,46 @@ app.UseStaticFiles();
 
 app.UseRouting();
 
-app.UseAuthentication();
+app.UseAuthentication();  // Сначала аутентификация
+app.UseAuthorization();   // Потом авторизация
 
-app.UseAuthorization();
+// ========== ДОБАВЛЯЕМ CORS МИДДЛВЭР ==========
+app.UseCors("AllowReactApp");
 
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Task}/{action=Index}/{id?}");
 
-SeedData(app.Services);
+// Добавляем маршруты для API
+app.MapControllers();
 
-static void SeedData(IServiceProvider serviceProvider)
+app.Run();
+
+// функция для загрузки тестовых данных
+static void SeedData(ApplicationDbContext context, UserManager<User> userManager)
 {
-    using var scope = serviceProvider.CreateScope();
-
-    var context =
-        scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-
-    context.Database.Migrate();
+    context.Database.EnsureCreated();
 
     if (context.Users.Any())
     {
         return;
     }
 
+    // Создаем пользователя через UserManager (чтобы хэшировать пароль)
     var user = new User
     {
         UserName = "testuser",
-        Email = "test@example.com",
-        PasswordHash = "test-password-hash"
+        Email = "test@example.com"
     };
 
-    context.Users.Add(user);
+    var result = userManager.CreateAsync(user, "Test123!").GetAwaiter().GetResult();
 
-    context.SaveChanges();
+    if (!result.Succeeded)
+    {
+        return;
+    }
 
-
-
-var projects = new[]
+    var projects = new[]
     {
         new Project
         {
@@ -128,7 +175,7 @@ var projects = new[]
 
     var tasks = new[]
     {
-        new DiaryTask
+        new TodoTask
         {
             Title = "Купить продукты",
             Description = "Молоко, хлеб, яйца",
@@ -138,7 +185,7 @@ var projects = new[]
             ProjectId = projects[0].Id,
             Deadline = DateTime.UtcNow.AddDays(1)
         },
-        new DiaryTask
+        new TodoTask
         {
             Title = "Сдать отчет",
             Description = "Подготовить квартальный отчет",
@@ -148,7 +195,7 @@ var projects = new[]
             ProjectId = projects[1].Id,
             Deadline = DateTime.UtcNow.AddHours(5)
         },
-        new DiaryTask
+        new TodoTask
         {
             Title = "Прочитать книгу",
             Description = "Глава 3",
@@ -158,7 +205,7 @@ var projects = new[]
             ProjectId = projects[2].Id,
             Deadline = null
         },
-        new DiaryTask
+        new TodoTask
         {
             Title = "Позвонить маме",
             Description = "",
@@ -187,4 +234,3 @@ var projects = new[]
     context.TaskTags.AddRange(taskTags);
     context.SaveChanges();
 }
-app.Run();
